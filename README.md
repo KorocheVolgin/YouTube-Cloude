@@ -1,16 +1,7 @@
 # YouTube-Cloude
 ---
 ## Вам понадобится установить зависимости
-><br/>import cv2
-<br/>import numpy as np
-<br/>import os
-<br/>import math
-<br/>import subprocess
-<br/>import tempfile
-<br/>import shutil
-<br/>import sys
-<br/>import re
-<br/>import hashlib
+<br/>pip install opencv-python numpy
 ---
 # Для кодирования любого файла:
 ><br/><code>python coder.py endcode FILENAME.xxx FILENAME.mp4</code>
