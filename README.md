@@ -60,10 +60,6 @@ python coder.py encode FILENAME.xxx OUTPUT.mp4 --key-file /path/to/key.txt
 python coder.py decode FILENAME.mp4 --key-file /path/to/key.txt
 ```
 
-### Автоматическое подхватывание ключа
-
-Если ни `--key`, ни `--key-file` не указаны, скрипт автоматически ищет файл `key.txt` в своей директории и использует его как ключ — если он существует.
-
 ---
 
 ## Справка
