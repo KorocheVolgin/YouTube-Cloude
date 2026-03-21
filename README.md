@@ -1,16 +1,9 @@
 # YouTube-Cloude
 ---
-## Вам понадобится установить зависимости (pip install ...)
-><br/> cv2
-<br/> numpy as np
-<br/> os
-<br/> math
-<br/> subprocess
-<br/> tempfile
-<br/> shutil
-<br/> sys
-<br/> re
-<br/> hashlib
+## Установите зависимости:
+
+`pip install -r requirements.txt`
+
 ---
 # Для кодирования любого файла в cmd.exe:
 ><br/><code>python coder.py encode FILENAME.xxx FILENAME.mp4</code>
