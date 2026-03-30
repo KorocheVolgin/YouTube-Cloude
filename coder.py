@@ -1,6 +1,5 @@
 # youtube_storage_fixed.py
-import cv2
-import numpy as np
+import hashlib
 import os
 import math
 import subprocess
@@ -8,8 +7,12 @@ import tempfile
 import shutil
 import sys
 import re
-import hashlib
-from collections import Counter
+
+import cv2
+import numpy as np
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
+
 
 class YouTubeEncoder:
     def __init__(self, key=None):
@@ -24,6 +27,7 @@ class YouTubeEncoder:
         
         # Ключ шифрования
         self.key = key
+        self.iv = hashlib.sha256(os.urandom(16)).hexdigest()[:16]
         self.use_encryption = key is not None
         
         # 16 цветов
@@ -67,18 +71,15 @@ class YouTubeEncoder:
         print(f"🔐 Шифрование: {'ВКЛ' if self.use_encryption else 'ВЫКЛ'}")
     
     def _encrypt_data(self, data):
-        """XOR шифрование с ключом"""
+        """AES шифрование с ключом"""
         if not self.use_encryption:
             return data
-        
-        key_bytes = self.key.encode()
-        result = bytearray()
-        
-        for i, byte in enumerate(data):
-            key_byte = key_bytes[i % len(key_bytes)]
-            result.append(byte ^ key_byte)
-        
-        return result
+
+        key = hashlib.sha256(self.key.encode()).digest()
+        cipher = AES.new(key, AES.MODE_CBC, self.iv.encode())
+        padded_plaintext = pad(data, AES.block_size)
+        ciphertext = cipher.encrypt(padded_plaintext)
+        return ciphertext
     
     def _draw_markers(self, frame):
         """Рисует маркеры по углам"""
@@ -148,7 +149,12 @@ class YouTubeEncoder:
             encrypted_data = data
         
         # Создаем заголовок
-        header = f"FILE:{os.path.basename(input_file)}:SIZE:{len(data)}|"
+        header = (
+            f"FILE:{os.path.basename(input_file)}:"
+            f"SIZE:{len(data)}:"
+            f"ENCRYPTED_SIZE:{len(encrypted_data)}:"
+            f"IV:{self.iv}|"
+        )
         header_bytes = header.encode('latin-1')
         print(f"📋 Заголовок: {header}")
         
@@ -274,7 +280,7 @@ class YouTubeEncoder:
 
 
 class YouTubeDecoder:
-    def __init__(self, key=None):
+    def __init__(self, key=None, iv=None):
         self.width = 1920
         self.height = 1080
         self.block_height = 16
@@ -284,6 +290,7 @@ class YouTubeDecoder:
         
         # Ключ шифрования
         self.key = key
+        self.iv = iv
         
         # 16 цветов
         self.colors = {
@@ -337,19 +344,16 @@ class YouTubeDecoder:
                 cy = self.marker_size + y * (self.block_height + self.spacing) + self.block_height // 2
                 self.block_coords.append((cx, cy))
     
-    def _decrypt_data(self, data):
-        """XOR дешифрование с ключом"""
+    def _decrypt_data(self, data, iv):
+        """XOR дешифрование с ключом  """
         if not self.key:
             return data
-        
-        key_bytes = self.key.encode()
-        result = bytearray()
-        
-        for i, byte in enumerate(data):
-            key_byte = key_bytes[i % len(key_bytes)]
-            result.append(byte ^ key_byte)
-        
-        return result
+
+        key = hashlib.sha256(self.key.encode()).digest()
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        decrypted_text = cipher.decrypt(data)
+        unpadded_text = unpad(decrypted_text, AES.block_size)
+        return unpadded_text
     
     def _color_to_bits_fast(self, color):
         """Оптимизированный поиск цвета"""
@@ -496,12 +500,14 @@ class YouTubeDecoder:
         
         # Поиск заголовка
         data_str = bytes_data[:1000].decode('latin-1', errors='ignore')
-        pattern = r'FILE:([^:]+):SIZE:(\d+)\|'
+        pattern = r'FILE:([^:]+):SIZE:(\d+):ENCRYPTED_SIZE:(\d+):IV:([^:]{16})\|'
         match = re.search(pattern, data_str)
         
         if match:
             filename = match.group(1)
             filesize = int(match.group(2))
+            encrypted_size = int(match.group(3))
+            iv = match.group(4).encode()
             
             print(f"\n✅ Найден заголовок: {filename}, размер: {filesize} байт")
             
@@ -511,11 +517,11 @@ class YouTubeDecoder:
             
             if header_pos >= 0:
                 # Извлекаем зашифрованные данные
-                encrypted_data = bytes_data[header_pos + len(header_bytes):header_pos + len(header_bytes) + filesize]
+                encrypted_data = bytes_data[header_pos + len(header_bytes):header_pos + len(header_bytes) + encrypted_size]
                 
                 # Дешифруем если есть ключ
                 if self.key:
-                    file_data = self._decrypt_data(encrypted_data)
+                    file_data = self._decrypt_data(encrypted_data, iv)
                     print(f"🔓 Данные расшифрованы")
                 else:
                     file_data = encrypted_data
