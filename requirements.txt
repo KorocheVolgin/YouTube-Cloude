@@ -1,0 +1,5 @@
+cffi==2.0.0
+numpy==2.4.4
+opencv-python==4.13.0.92
+pycrypto==2.6.1
+pycryptodome==3.23.0
