@@ -1,0 +1,62 @@
+name: Tests
+
+on:
+  push:
+    paths:
+      - '**.py'
+      - 'pyproject.toml'
+      - '.github/workflows/test.yml'
+  pull_request:
+    paths:
+      - '**.py'
+      - 'pyproject.toml'
+      - '.github/workflows/test.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.12']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache ffmpeg static binary
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin
+          key: ffmpeg-amd64-static-v3
+
+      - name: Install ffmpeg
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          for i in 1 2 3 4 5; do
+            curl -sfL --retry 3 --retry-delay 5 \
+              https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz | \
+              tar -xJ --wildcards --strip-components=1 -C /usr/local/bin '*/ffmpeg' '*/ffprobe' && break || true
+            echo "Attempt $i failed, retrying in $((i*5))s..." >&2
+            sleep $((i*5))
+          done
+          command -v ffmpeg &>/dev/null || { echo "::error::ffmpeg install failed"; exit 1; }
+
+      - name: Verify ffmpeg
+        run: |
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+
+      - name: Install package with dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short -x

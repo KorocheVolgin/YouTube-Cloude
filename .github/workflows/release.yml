@@ -1,0 +1,491 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (e.g. v1.0.0)'
+        required: true
+        type: string
+      dry_run:
+        description: 'Dry run — build only, do not create tag/release'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  # ── Validate ────────────────────────────────────────────────────────────
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate version format
+        run: |
+          VERSION="${{ inputs.version }}"
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "❌ Invalid version: $VERSION (expected v1.0.0)"
+            exit 1
+          fi
+      - name: Check tag does not exist
+        run: |
+          if git ls-remote --tags origin | grep -q "refs/tags/${{ inputs.version }}$"; then
+            echo "❌ Tag ${{ inputs.version }} already exists!"
+            exit 1
+          fi
+
+  # ── Test ────────────────────────────────────────────────────────────────
+  test:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache ffmpeg
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin
+          key: ffmpeg-amd64-static-v3
+      - name: Install ffmpeg
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          for i in 1 2 3 4 5; do
+            curl -sfL --retry 3 --retry-delay 5 \
+              https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz | \
+              tar -xJ --wildcards --strip-components=1 -C /usr/local/bin '*/ffmpeg' '*/ffprobe' && break || true
+            echo "Attempt $i failed, retrying in $((i*5))s..." >&2
+            sleep $((i*5))
+          done
+          command -v ffmpeg &>/dev/null || { echo "::error::ffmpeg install failed"; exit 1; }
+
+      - run: pip install -e ".[dev,gui]"
+      - run: pytest tests/ -v --tb=short -x
+
+  # ── Desktop: Nuitka CLI + Nuitka GUI (all compiled) ────────────────────
+  build-desktop:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: linux-amd64
+          - os: windows-latest
+            artifact: windows-amd64
+          - os: macos-latest
+            artifact: macos-arm64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        shell: bash
+        run: pip install -e ".[dev,gui]" nuitka ordered-set "PySide6>=6.5"
+
+      - name: Cache ffmpeg (Linux)
+        if: runner.os == 'Linux'
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin
+          key: ffmpeg-amd64-static-v3
+
+      # ── ffmpeg ──
+      - name: Install ffmpeg (Linux)
+        if: runner.os == 'Linux' && steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          for i in 1 2 3 4 5; do
+            curl -sfL --retry 3 --retry-delay 5 \
+              https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz | \
+              tar -xJ --wildcards --strip-components=1 -C /usr/local/bin '*/ffmpeg' '*/ffprobe' && break || true
+            echo "Attempt $i failed, retrying in $((i*5))s..." >&2
+            sleep $((i*5))
+          done
+          command -v ffmpeg &>/dev/null || { echo "::error::ffmpeg install failed after retries"; exit 1; }
+      - name: Show ffmpeg version (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+      - name: Install ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          if ! command -v ffmpeg &>/dev/null; then
+            choco install ffmpeg -y
+          fi
+      - name: Install ffmpeg (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          if ! command -v ffmpeg &>/dev/null; then
+            brew install ffmpeg
+          fi
+
+      - name: Bundle ffmpeg binaries
+        shell: bash
+        run: |
+          mkdir -p ffmpeg-bin
+          # Copy installed ffmpeg/ffprobe into ffmpeg-bin for bundling
+          if command -v ffmpeg &>/dev/null; then
+            cp "$(command -v ffmpeg)" ffmpeg-bin/ffmpeg 2>/dev/null || cp "$(which ffmpeg)" ffmpeg-bin/ffmpeg 2>/dev/null || true
+            # Windows: ffmpeg is ffmpeg.exe
+            if [ -f "ffmpeg-bin/ffmpeg" ] && [ "$RUNNER_OS" = "Windows" ]; then
+              mv ffmpeg-bin/ffmpeg ffmpeg-bin/ffmpeg.exe 2>/dev/null || true
+            fi
+          fi
+          if command -v ffprobe &>/dev/null; then
+            cp "$(command -v ffprobe)" ffmpeg-bin/ffprobe 2>/dev/null || cp "$(which ffprobe)" ffmpeg-bin/ffprobe 2>/dev/null || true
+            if [ -f "ffmpeg-bin/ffprobe" ] && [ "$RUNNER_OS" = "Windows" ]; then
+              mv ffmpeg-bin/ffprobe ffmpeg-bin/ffprobe.exe 2>/dev/null || true
+            fi
+          fi
+          # Fallback: search common Windows chocolatey path
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            [ -f ffmpeg-bin/ffmpeg.exe ] || cp "C:/ProgramData/chocolatey/bin/ffmpeg.exe" ffmpeg-bin/ffmpeg.exe 2>/dev/null || true
+            [ -f ffmpeg-bin/ffprobe.exe ] || cp "C:/ProgramData/chocolatey/bin/ffprobe.exe" ffmpeg-bin/ffprobe.exe 2>/dev/null || true
+          fi
+          echo "=== ffmpeg-bin ==="; ls -lh ffmpeg-bin/ 2>/dev/null || echo "no ffmpeg-bin"; echo "=== ffmpeg version ==="; ffmpeg -version 2>/dev/null | head -1 || ./ffmpeg-bin/ffmpeg -version 2>/dev/null | head -1 || true
+
+      # ── CLI: Nuitka (compiled) ──
+      - name: Build CLI (Nuitka)
+        shell: bash
+        run: |
+          # --onefile only on Windows (single small .exe). On Linux/macOS build
+          # --standalone (no --onefile) to avoid the huge onefile payloads; the
+          # standalone dirs are packaged into .AppImage/.dmg below.
+          ONEFILE=""
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ONEFILE="--onefile"
+          fi
+          # Prepare ffmpeg data-file args if bundled binaries exist (platform-specific)
+          FFMPEG_ARGS=""
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            [ -f ffmpeg-bin/ffmpeg.exe ] && FFMPEG_ARGS="$FFMPEG_ARGS --include-data-files=$(pwd)/ffmpeg-bin/ffmpeg.exe=ffmpeg.exe"
+            [ -f ffmpeg-bin/ffprobe.exe ] && FFMPEG_ARGS="$FFMPEG_ARGS --include-data-files=$(pwd)/ffmpeg-bin/ffprobe.exe=ffprobe.exe"
+          else
+            [ -f ffmpeg-bin/ffmpeg ] && FFMPEG_ARGS="$FFMPEG_ARGS --include-data-files=$(pwd)/ffmpeg-bin/ffmpeg=ffmpeg"
+            [ -f ffmpeg-bin/ffprobe ] && FFMPEG_ARGS="$FFMPEG_ARGS --include-data-files=$(pwd)/ffmpeg-bin/ffprobe=ffprobe"
+          fi
+          python -m nuitka \
+            --standalone $ONEFILE \
+            --include-package=youtube_cloude \
+            --include-package=reedsolo \
+            $FFMPEG_ARGS \
+            --output-filename=youtube-cloude \
+            --output-dir=nuitka-build \
+            --assume-yes-for-downloads \
+            --windows-company-name=valeksan \
+            --windows-product-name=YouTube-Cloude \
+            --windows-file-version=1.1.1 \
+            --windows-file-description="YouTube-Cloude CLI" \
+            src/youtube_cloude/cli.py
+
+      # ── GUI: Nuitka + PySide6 plugin (compiled) ──
+      - name: Build GUI (Nuitka + PySide6)
+        shell: bash
+        run: |
+          ONEFILE=""
+          NUITKA_FLAGS=""
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ONEFILE="--onefile"
+            NUITKA_FLAGS="--windows-console-mode=disable"
+          fi
+          FFMPEG_ARGS=""
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            [ -f ffmpeg-bin/ffmpeg.exe ] && FFMPEG_ARGS="$FFMPEG_ARGS --include-data-files=$(pwd)/ffmpeg-bin/ffmpeg.exe=ffmpeg.exe"
+            [ -f ffmpeg-bin/ffprobe.exe ] && FFMPEG_ARGS="$FFMPEG_ARGS --include-data-files=$(pwd)/ffmpeg-bin/ffprobe.exe=ffprobe.exe"
+          else
+            [ -f ffmpeg-bin/ffmpeg ] && FFMPEG_ARGS="$FFMPEG_ARGS --include-data-files=$(pwd)/ffmpeg-bin/ffmpeg=ffmpeg"
+            [ -f ffmpeg-bin/ffprobe ] && FFMPEG_ARGS="$FFMPEG_ARGS --include-data-files=$(pwd)/ffmpeg-bin/ffprobe=ffprobe"
+          fi
+          python -m nuitka \
+            --standalone $ONEFILE \
+            --enable-plugin=pyside6 \
+            --include-package=youtube_cloude \
+            --include-package=reedsolo \
+            --include-package-data=PySide6 \
+            $FFMPEG_ARGS \
+            --output-filename=youtube-cloude-gui \
+            --output-dir=nuitka-build \
+            --assume-yes-for-downloads \
+            --windows-company-name=valeksan \
+            --windows-product-name=YouTube-Cloude \
+            --windows-file-version=1.1.1 \
+            --windows-file-description="YouTube-Cloude GUI" \
+            $NUITKA_FLAGS \
+            src/youtube_cloude/gui_qt_cli.py
+
+      # ── Package: rename + platform bundles (.exe / .tar.xz + .AppImage / .dmg) ──
+      - name: Package artifacts
+        shell: bash
+        run: |
+          set -e
+          TAG="${{ inputs.version }}"
+          ARTIFACT="${{ matrix.artifact }}"
+          mkdir -p dist
+
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            [ -f nuitka-build/youtube-cloude.exe ] && \
+              mv nuitka-build/youtube-cloude.exe "dist/youtube-cloude-${TAG}-${ARTIFACT}.exe"
+            [ -f nuitka-build/youtube-cloude-gui.exe ] && \
+              mv nuitka-build/youtube-cloude-gui.exe "dist/youtube-cloude-gui-${TAG}-${ARTIFACT}.exe"
+
+          elif [ "$RUNNER_OS" = "Linux" ]; then
+            # Portable .tar.xz fallbacks
+            for APP in youtube-cloude youtube-cloude-gui; do
+              DISTDIR="$(dirname "$(find nuitka-build -name "${APP}" -type f | head -1)")"
+              [ -z "$DISTDIR" ] && continue
+              tar -C "$(dirname "$DISTDIR")" \
+                -cJf "dist/${APP}-${TAG}-${ARTIFACT}.tar.xz" "$(basename "$DISTDIR")"
+            done
+
+            # .AppImage (Komi Store format)
+            curl -sL \
+              https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage \
+              -o /tmp/appimagetool
+            chmod +x /tmp/appimagetool
+
+            for APP in youtube-cloude youtube-cloude-gui; do
+              DISTDIR="$(dirname "$(find nuitka-build -name "${APP}" -type f | head -1)")"
+              [ -z "$DISTDIR" ] && continue
+              rm -rf AppDir && mkdir -p AppDir/usr
+              cp -a "$DISTDIR/." AppDir/usr/
+              printf '%s\n' \
+                '#!/bin/sh' \
+                'HERE="$(dirname "$(readlink -f "$0")")"' \
+                'exec "$HERE/usr/APPBIN" "$@"' > AppDir/AppRun
+              sed -i "s/APPBIN/${APP}/" AppDir/AppRun
+              chmod +x AppDir/AppRun
+              printf '%s\n' \
+                '[Desktop Entry]' \
+                'Name=YouTube-Cloude' \
+                "Exec=${APP}" \
+                "Icon=${APP}" \
+                'Type=Application' \
+                'Categories=Utility;' > "AppDir/${APP}.desktop"
+              python -c "import sys; from PIL import Image, ImageDraw; img=Image.new('RGB',(256,256),(255,255,255)); d=ImageDraw.Draw(img); d.ellipse((16,16,240,240),fill=(230,0,0)); img.save('AppDir/%s.png' % sys.argv[1])" "${APP}"
+              ARCH=x86_64 /tmp/appimagetool --appimage-extract-and-run \
+                AppDir "dist/${APP}-${TAG}-${ARTIFACT}.AppImage"
+              rm -rf AppDir
+            done
+
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            # .dmg (Komi Store format) — use unique volname per app to avoid hdiutil Resource busy
+            for APP in youtube-cloude youtube-cloude-gui; do
+              DISTDIR="$(dirname "$(find nuitka-build -name "${APP}" -type f | head -1)")"
+              [ -z "$DISTDIR" ] && continue
+              DMG="dist/${APP}-${TAG}-${ARTIFACT}.dmg"
+              rm -f "$DMG"
+              rm -rf stage && mkdir -p stage
+              cp -a "$DISTDIR/." stage/
+              ln -sf /Applications "stage/Applications"
+              # detach any stale mount with same name
+              hdiutil detach "/Volumes/YouTube-Cloude ${APP}" 2>/dev/null || true
+              hdiutil create -volname "YouTube-Cloude ${APP}" -srcfolder stage -ov \
+                -format UDZO "$DMG" || sleep 2 && hdiutil create -volname "YouTube-Cloude ${APP}" -srcfolder stage -ov \
+                -format UDZO "$DMG"
+              rm -rf stage
+              hdiutil detach "/Volumes/YouTube-Cloude ${APP}" 2>/dev/null || true
+            done
+          fi
+
+          echo "=== Build artifacts ==="
+          ls -lh dist/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.artifact }}
+          path: dist/
+          retention-days: 7
+
+  # ── Android: Kivy GUI (Buildozer) ─────────────────────────────────────
+  build-android:
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      ACLOCAL_PATH: /usr/share/aclocal:/usr/lib/x86_64-linux-gnu/aclocal
+      # p4a (via buildozer) creates a python3.14 venv and runs `pip install -U pip`,
+      # which installs the latest pip (26.2.x) where the pip._internal.exceptions
+      # BuildDependencyInstallError class was removed -> the build dies with
+      # "ImportError: cannot import name 'BuildDependencyInstallError'".
+      # Pin pip < 26.2 so the venv keeps a pip that still has that class.
+      PIP_CONSTRAINT: ${{ github.workspace }}/pip-constraints.txt
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pin pip version for p4a venv
+        shell: bash
+        run: |
+          printf 'pip<26.2\n' > "${{ github.workspace }}/pip-constraints.txt"
+          cat "${{ github.workspace }}/pip-constraints.txt"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install system dependencies
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            autoconf automake libtool libtool-bin libltdl-dev \
+            pkg-config \
+            zlib1g-dev libncurses-dev \
+            cmake libffi-dev libssl-dev \
+            openjdk-17-jdk unzip wget \
+            lld clang
+          # Verify: LT_SYS_SYMBOL_USCORE macro is now available
+          grep -q "LT_SYS_SYMBOL_USCORE" /usr/share/aclocal/ltdl.m4 && \
+            echo "OK: LT_SYS_SYMBOL_USCORE found in ltdl.m4" || \
+            echo "WARNING: LT_SYS_SYMBOL_USCORE not found"
+
+      - name: Install Buildozer + Kivy
+        shell: bash
+        run: pip install buildozer cython kivy
+
+      - name: Create buildozer.spec
+        shell: bash
+        run: |
+          TAG="${{ inputs.version }}"
+          # p4a requires a purely numeric version (it does int() on each
+          # dot-separated part), so strip a leading 'v' and any '-suffix'.
+          ANDROID_VERSION="${TAG#v}"
+          ANDROID_VERSION="${ANDROID_VERSION%%-*}"
+          cat > buildozer.spec << 'SPEC'
+          [app]
+          title = YouTube-Cloude
+          package.name = youtube_cloude
+          package.domain = com.valeksan
+          source.dir = src
+          source.include_exts = py,png,jpg,kv,atlas
+          source.main = youtube_cloude.gui_kivy:main
+          version = ANDROIDVERSIONPLACEHOLDER
+          requirements = python3,kivy,numpy,pillow,pycryptodome,requests==2.25.1
+          orientation = portrait
+          fullscreen = 0
+          android.permissions = CAMERA,INTERNET,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE
+          android.api = 33
+          android.minapi = 24
+          android.ndk = 27b
+          android.archs = arm64-v8a
+          android.accept_sdk_license = True
+          p4a.branch = master
+          p4a.local_recipes = recipes
+          SPEC
+          sed -i "s/ANDROIDVERSIONPLACEHOLDER/${ANDROID_VERSION}/" buildozer.spec
+          echo "Android version: ${ANDROID_VERSION}"
+
+      - name: Build Android APK
+        shell: bash
+        run: |
+          EXIT=0
+          for i in 1 2 3; do
+            buildozer android debug && { EXIT=0; break; } || EXIT=$?
+            echo "Buildozer attempt $i failed (exit $EXIT), retrying in $((i*30))s..." >&2
+            sleep $((i*30))
+          done
+          exit $EXIT
+        timeout-minutes: 120
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: binaries-android
+          path: bin/*.apk
+          retention-days: 7
+
+  # ── Release ─────────────────────────────────────────────────────────────
+  release:
+    needs: [build-desktop, build-android]
+    runs-on: ubuntu-latest
+    if: needs.build-desktop.result == 'success' && needs.build-android.result == 'success'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create tag
+        shell: bash
+        run: |
+          TAG="${{ inputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          pattern: binaries-*
+          merge-multiple: true
+
+      - name: List artifacts
+        shell: bash
+        run: find artifacts/ -type f -exec ls -lh {} \;
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "YouTube-Cloude ${{ inputs.version }}"
+          tag_name: ${{ inputs.version }}
+          body: |
+            ## YouTube-Cloude ${{ inputs.version }}
+
+            ### Downloads
+
+            **Desktop** — compiled with Nuitka (Python → C → machine code):
+            | Platform | CLI | GUI |
+            |----------|-----|-----|
+            | **Linux** (amd64) | `youtube-cloude-*-linux-amd64.AppImage` / `.tar.xz` | `youtube-cloude-gui-*-linux-amd64.AppImage` / `.tar.xz` |
+            | **Windows** (amd64) | `youtube-cloude-*-windows-amd64.exe` | `youtube-cloude-gui-*-windows-amd64.exe` |
+            | **macOS** (arm64) | `youtube-cloude-*-macos-arm64.dmg` | `youtube-cloude-gui-*-macos-arm64.dmg` |
+
+            **Android** — native APK (Kivy + Buildozer):
+            | Platform | APK |
+            |----------|-----|
+            | **Android** (arm64) | `youtube_cloude-*.apk` |
+
+            ### Desktop CLI
+            ```bash
+            youtube-cloude encode secret.txt output.mp4 --format ytv2
+            youtube-cloude decode output.mp4 --format ytv2
+            ```
+
+            ### Desktop GUI
+            - **Windows**: double-click `youtube-cloude-gui-*.exe`
+            - **Linux**: make `youtube-cloude-gui-*.AppImage` executable (`chmod +x`) and run it
+            - **macOS**: open `youtube-cloude-gui-*.dmg`
+
+            ### Android
+            - Install APK → grant permissions → use GUI
+            - Or via Termux: `pkg install python ffmpeg && pip install youtube-cloude`
+
+            ### Build Info
+            - **All builds**: Nuitka (compiled, 2-5× faster than interpreted Python)
+            - **Desktop GUI**: PySide6 via Nuitka pyside6 plugin
+            - **Android**: Kivy GUI via Buildozer (native APK)
+          files: artifacts/**/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

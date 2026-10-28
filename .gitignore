@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+*.spec
+.venv/
+.benchmark_run/
+benchmark_input.png
+ffmpeg-bin/
+nuitka-build/

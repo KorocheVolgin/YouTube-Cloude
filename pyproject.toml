@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "youtube-cloude"
+version = "1.1.1"
+description = "Cross-platform app (CLI + Qt/Kivy GUI, Windows/Linux/macOS/Android) to store files in YouTube videos — YTV1/YTV2/YTV3, AES-256-GCM, Reed-Solomon"
+readme = "README.md"
+license = {text = "Proprietary — see README.md"}
+requires-python = ">=3.10"
+authors = [
+    {name = "valeksan"},
+]
+keywords = ["steganography", "video", "youtube", "file-hiding", "data-encoding", "covert-channel"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Multimedia :: Video",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "numpy>=1.24",
+    "Pillow>=10.0",
+    "pycryptodome>=3.19",
+    "reedsolo>=1.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+gui = [
+    "PySide6>=6.5",
+]
+android = [
+    "kivy>=2.2",
+    "plyer>=2.0",
+]
+gui-android = [
+    "kivy>=2.2",
+    "plyer>=2.0",
+    "buildozer>=1.5",
+]
+
+[project.scripts]
+youtube-cloude = "youtube_cloude.utils:main"
+
+[project.gui-scripts]
+youtube-cloude-gui = "youtube_cloude.gui:main"
+youtube-cloude-gui-qt = "youtube_cloude.gui_qt:main"
+youtube-cloude-gui-kivy = "youtube_cloude.gui_kivy:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
